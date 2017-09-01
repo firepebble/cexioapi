@@ -38,7 +38,19 @@ type requestTicker struct {
 	Oid  string   `json:"oid"`
 }
 
-type responseTicker struct {
+type requestInitOhlcvNew struct {
+	E    string   `json:"e"`
+	I    string `json:"i"`
+	Rooms  []string   `json:"rooms"`
+}
+
+type requestGetBalance struct {
+	E    string   `json:"e"`
+	Data string `json:"data"`
+	Oid  string   `json:"oid"`
+}
+
+type ResponseTicker struct {
 	E    string             `json:"e"`
 	Data responseTickerData `json:"data"`
 	OK   string             `json:"ok"`
@@ -70,6 +82,38 @@ type responseOrderBookSubscribe struct {
 	OK   string                         `json:"ok"`
 	Oid  string                         `json:"oid"`
 }
+
+type responseGetBalance struct {
+	E string `json:"e"`
+	Data balanceData `json:"data"`
+	Time int64 `json:"time"`
+	Oid  string        `json:"oid"`
+	OK   string        `json:"ok"`
+}
+
+type balanceData struct {
+	Balance BalanceS `json:"balance"`
+	Obalance ObalanceS `json:"obalance"`
+}
+
+type BalanceS struct {
+	LTC string `json:"LTC"`
+	USD string `json:"USD"`
+	RUB string `json:"RUB"`
+	EUR string `json:"EUR"`
+	GHS string `json:"GHS"`
+	BTC string `json:"BTC"`
+} 
+
+type ObalanceS struct {
+	BTC string `json:"BTC"`
+	USD string `json:"USD"`
+}
+
+
+
+
+
 
 type responseOrderBookSubscribeData struct {
 	Timestamp int64       `json:"timestamp"`

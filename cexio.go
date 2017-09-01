@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
-	"os"
 	"sync"
 	"time"
+
+	log "github.com/sirupsen/logrus"
+
+	"strings"
 
 	"github.com/gorilla/websocket"
 )
@@ -30,11 +32,19 @@ type API struct {
 
 	//Dialer used to connect to WebSocket server
 	Dialer *websocket.Dialer
-	//Logger used for error logging
-	Logger *log.Logger
 
 	//ReceiveDone send message after Close() initiation
 	ReceiveDone chan bool
+
+	//HeartBeat
+	HeartBeat chan bool
+
+	//HeartMonitor
+	HeartMonitor chan bool
+	watchDogUp   bool
+	//mu           *sync.Mutex
+	cond      *sync.Cond
+	connected bool
 }
 
 var apiURL = "wss://ws.cex.io/ws"
@@ -46,20 +56,24 @@ func NewAPI(key string, secret string) *API {
 		Key:                 key,
 		Secret:              secret,
 		Dialer:              websocket.DefaultDialer,
-		Logger:              log.New(os.Stderr, "", log.LstdFlags),
 		responseSubscribers: map[string]chan subscriberType{},
 		subscriberMutex:     sync.Mutex{},
 		orderBookHandlers:   map[string]chan bool{},
 		stopDataCollector:   false,
 		ReceiveDone:         make(chan bool),
 	}
-
+	locker := &sync.Mutex{}
+	api.cond = sync.NewCond(locker)
+	api.HeartMonitor = make(chan bool)
+	api.HeartBeat = make(chan bool, 100)
 	return api
 }
 
 //Connect connects to cex.io websocket API server
 func (a *API) Connect() error {
-
+	a.cond.L.Lock()
+	a.connected = false
+	go a.watchDog()
 	sub := a.subscribe("connected")
 	defer a.unsubscribe("connected")
 
@@ -70,7 +84,7 @@ func (a *API) Connect() error {
 	a.conn = conn
 
 	// run response from API server collector
-	go a.responseCollector()
+	go a.connectionResponse()
 
 	<-sub //wait for connect response
 
@@ -79,14 +93,18 @@ func (a *API) Connect() error {
 	if err != nil {
 		return err
 	}
+	log.Info("Connection complete!!")
+	a.connected = true
+	a.cond.L.Unlock()
+	a.cond.Broadcast()
 
 	return nil
 }
 
 //Close closes API connection
-func (a *API) Close() error {
-
-	a.stopDataCollector = true
+func (a *API) Close(ID string) error {
+	log.Info("Closing CEXIO Websocket connection...", ID)
+	//a.stopDataCollector = true
 
 	err := a.conn.Close()
 	if err != nil {
@@ -96,15 +114,17 @@ func (a *API) Close() error {
 	go func() {
 		a.ReceiveDone <- true
 	}()
-
+	log.Info("CEXIO Websocket connection closed!!", ID)
 	return nil
 }
 
 //Ticker send ticker request
-func (a *API) Ticker(cCode1 string, cCode2 string) (*responseTicker, error) {
-
+func (a *API) Ticker(cCode1 string, cCode2 string) (*ResponseTicker, error) {
+	a.cond.L.Lock()
+	for !a.connected {
+		a.cond.Wait()
+	}
 	action := "ticker"
-
 	sub := a.subscribe(action)
 	defer a.unsubscribe(action)
 
@@ -116,25 +136,112 @@ func (a *API) Ticker(cCode1 string, cCode2 string) (*responseTicker, error) {
 		Oid:  fmt.Sprintf("%d_%s:%s", timestamp, cCode1, cCode2),
 	}
 
-	err := a.conn.WriteJSON(msg)
+	err := a.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+
 	if err != nil {
-		return nil, err
+		myError, _ := fmt.Printf("read deadline:%s\n ", err.Error())
+		log.Error(myError)
 	}
+
+	err = a.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+
+	if err != nil {
+		myError, _ := fmt.Printf("write deadline:%s\n ", err.Error())
+		log.Error(myError)
+	}
+
+	err = a.conn.WriteJSON(msg)
+	if err != nil {
+		log.Error("xxx WriteJSON error:", err.Error())
+		doRestart := false
+
+		if strings.Contains(err.Error(), "use of closed connection") {
+			doRestart = true
+			log.Warn("use of closed connection detected, handling error")
+		}
+
+		if doRestart {
+			log.Warn("restarting conn...")
+			a.reconnect()
+			log.Warn("Rewriting jsjon...")
+			err := a.conn.WriteJSON(msg)
+			if err != nil {
+				log.Fatal("Could not WriteJSON after reconnection...")
+			}
+			log.Warn("Rewriting jsjon...done!!")
+		} else {
+			//a.mu.Unlock()
+			log.Error("Con WriteJson: ", err.Error())
+			a.cond.L.Unlock()
+			return nil, err
+		}
+
+	}
+	a.cond.L.Unlock()
+	/*
+		if err != nil {
+			log.Error("Error while geting ticker: ", err.Error())
+			ws.reconnect()
+			ticker, err = ws.api.Ticker(cCode1, cCode2)
+		}
+	*/
 
 	// wait for response from sever
 	respMsg := (<-sub).([]byte)
-
-	resp := &responseTicker{}
+	resp := &ResponseTicker{}
 	err = json.Unmarshal(respMsg, resp)
 	if err != nil {
+		log.Error("Conn Unmarshal: ", err.Error())
 		return nil, err
 	}
 
 	// check if authentication was successfull
 	if resp.OK != "ok" {
+		log.Error("Conn Authentication: ", resp.Data)
 		return nil, errors.New(resp.Data.Error)
 	}
+	return resp, nil
+}
 
+//Ticker send ticker request
+func (a *API) GetBalance() (*responseGetBalance, error) {
+	a.cond.L.Lock()
+	action := "get-balance"
+
+	sub := a.subscribe(action)
+	defer a.unsubscribe(action)
+
+	timestamp := time.Now().UnixNano()
+
+	msg := requestGetBalance{
+		E:    action,
+		Data: "",
+		Oid:  fmt.Sprintf("%d_%s", timestamp, action),
+	}
+
+	err := a.conn.WriteJSON(msg)
+	if err != nil {
+		a.cond.L.Unlock()
+		return nil, err
+	}
+
+	// wait for response from sever
+	resp := (<-sub).(*responseGetBalance)
+
+	/*
+		resp := &responseGetBalance{}
+		err = json.Unmarshal(respMsg, resp)
+		if err != nil {
+			return nil, err
+		}
+	*/
+
+	// check if authentication was successfull
+	if resp.OK != "ok" {
+		a.cond.L.Unlock()
+		return nil, errors.New(resp.OK)
+	}
+	a.cond.L.Unlock()
 	return resp, nil
 }
 
@@ -196,7 +303,7 @@ func (a *API) handleOrderBookSubscriptions(bookSnapshot *responseOrderBookSubscr
 
 	sub, err := a.subscriber(subscriptionIdentifier)
 	if err != nil {
-		a.Logger.Println(err)
+		log.Info(err)
 		return
 	}
 
@@ -266,87 +373,246 @@ func (a *API) OrderBookUnsubscribe(cCode1 string, cCode2 string) error {
 	return nil
 }
 
-func (a *API) responseCollector() {
-	defer a.Close()
+//Ticker send ticker request
+func (a *API) InitOhlcvNew(cCode1 string, cCode2 string) (*ResponseTicker, error) {
+	action := "init-ohlcv-new"
+
+	sub := a.subscribe(action)
+	defer a.unsubscribe(action)
+
+	//timestamp := time.Now().UnixNano()
+
+	pairString := fmt.Sprintf("pair-%s-%s", cCode1, cCode2)
+
+	msg := requestInitOhlcvNew{
+		E:     action,
+		I:     "1m",
+		Rooms: []string{pairString},
+	}
+	a.cond.L.Lock()
+	err := a.conn.WriteJSON(msg)
+	if err != nil {
+		a.cond.L.Unlock()
+		log.Error("Con WriteJson: ", err.Error())
+		return nil, err
+	}
+	a.cond.L.Unlock()
+	// wait for response from sever
+	fmt.Println("Waiting olhcv response...")
+	respMsg := (<-sub).([]byte)
+	fmt.Println("Waiting olhcv response...done!!")
+	resp := &ResponseTicker{}
+	err = json.Unmarshal(respMsg, resp)
+	if err != nil {
+		//a.cond.L.Unlock()
+		log.Error("Conn Unmarshal: ", err.Error())
+		return nil, err
+	}
+
+	// check if authentication was successfull
+	if resp.OK != "ok" {
+		//a.cond.L.Unlock()
+		log.Error("Conn Authentication: ", err.Error())
+		return nil, errors.New(resp.Data.Error)
+	}
+	return resp, nil
+}
+
+func (a *API) ResponseCollector() {
+	defer a.Close("ResponseCollector")
 
 	a.stopDataCollector = false
 
 	resp := &responseAction{}
 
 	for a.stopDataCollector == false {
+		a.cond.L.Lock()
+		for !a.connected {
+			log.Debug("DataCollector waiting...")
+			a.cond.Wait()
+			log.Debug("DataCollector continue...")
+		}
+		a.cond.L.Unlock()
 		_, msg, err := a.conn.ReadMessage()
 		if err != nil {
-			a.Logger.Println(err)
-			return
+			log.Error("responseCollector, ReadMessage error: ", err.Error())
+			//a.reconnect()
+			a.cond.L.Lock()
+			a.connected = false
+			a.cond.L.Unlock()
+			a.HeartBeat <- true
+			a.reconnect()
+			log.Debug("response: reconnect complete")
+			//continue
 		}
+
+		//Send heart beat
+		a.HeartBeat <- true
 
 		err = json.Unmarshal(msg, resp)
 		if err != nil {
-			a.Logger.Printf("responseCollector: %s\nData: %s\n", err, string(msg))
+			log.Errorf("responseCollector: %s\nData: %s\n", err, string(msg))
 			continue
 		}
 
 		subscriberIdentifier := resp.Action
 
-		if resp.Action == "ping" {
-			a.pong()
-			continue
-		}
+		switch resp.Action {
 
-		if resp.Action == "disconnecting" {
-			a.Logger.Println(string(msg))
-			break
-		}
+		case "ping":
+			{
 
-		if resp.Action == "order-book-subscribe" {
-			ob := &responseOrderBookSubscribe{}
-			err = json.Unmarshal(msg, ob)
-			if err != nil {
-				a.Logger.Printf("responseCollector | order-book-subscribe: %s\nData: %s\n", err, string(msg))
+				go a.pong()
 				continue
 			}
 
-			subscriberIdentifier = fmt.Sprintf("order-book-subscribe_%s", ob.Data.Pair)
-
-			sub, err := a.subscriber(subscriberIdentifier)
-			if err != nil {
-				a.Logger.Printf("No response handler for message: %s", string(msg))
-				continue // don't know how to handle message so just skip it
+		case "disconnecting":
+			{
+				log.Info("Disconnecting...")
+				log.Info("disconnecting:", string(msg))
+				break
 			}
+		case "order-book-subscribe":
+			{
 
-			sub <- ob
-			continue
-		}
+				ob := &responseOrderBookSubscribe{}
+				err = json.Unmarshal(msg, ob)
+				if err != nil {
+					log.Errorf("responseCollector | order-book-subscribe: %s\nData: %s\n", err, string(msg))
+					continue
+				}
 
-		if resp.Action == "md_update" {
+				subscriberIdentifier = fmt.Sprintf("order-book-subscribe_%s", ob.Data.Pair)
 
-			ob := &responseOrderBookUpdate{}
-			err = json.Unmarshal(msg, ob)
-			if err != nil {
-				a.Logger.Printf("responseCollector | md_update: %s\nData: %s\n", err, string(msg))
+				sub, err := a.subscriber(subscriberIdentifier)
+				if err != nil {
+					log.Error("No response handler for message: %s", string(msg))
+					continue // don't know how to handle message so just skip it
+				}
+
+				sub <- ob
+				continue
+			}
+		case "md_update":
+			{
+
+				ob := &responseOrderBookUpdate{}
+				err = json.Unmarshal(msg, ob)
+				if err != nil {
+					log.Infof("responseCollector | md_update: %s\nData: %s\n", err, string(msg))
+					continue
+				}
+
+				subscriberIdentifier = fmt.Sprintf("md_update_%s", ob.Data.Pair)
+
+				sub, err := a.subscriber(subscriberIdentifier)
+				if err != nil {
+					log.Infof("No response handler for message: %s", string(msg))
+					continue // don't know how to handle message so just skip it
+				}
+
+				sub <- ob
+				continue
+			}
+		case "get-balance":
+			{
+				ob := &responseGetBalance{}
+				err = json.Unmarshal(msg, ob)
+				if err != nil {
+					log.Infof("responseCollector | get_balance: %s\nData: %s\n", err, string(msg))
+					continue
+				}
+
+				subscriberIdentifier = "get-balance"
+
+				sub, err := a.subscriber(subscriberIdentifier)
+				if err != nil {
+					log.Infof("No response handler for message: %s", string(msg))
+					continue // don't know how to handle message so just skip it
+				}
+
+				sub <- ob
 				continue
 			}
 
-			subscriberIdentifier = fmt.Sprintf("md_update_%s", ob.Data.Pair)
-
+		default:
 			sub, err := a.subscriber(subscriberIdentifier)
 			if err != nil {
-				a.Logger.Printf("No response handler for message: %s", string(msg))
+				log.Errorf("No response handler for message: %s", string(msg))
 				continue // don't know how to handle message so just skip it
 			}
+			//log.Debug("Sending response:", string(msg))
+			sub <- msg
 
-			sub <- ob
-			continue
 		}
-
-		sub, err := a.subscriber(subscriberIdentifier)
-		if err != nil {
-			a.Logger.Printf("No response handler for message: %s", string(msg))
-			continue // don't know how to handle message so just skip it
-		}
-
-		sub <- msg
 	}
+
+}
+
+func (a *API) connectionResponse() {
+
+	resp := &responseAction{}
+
+	for !a.connected {
+
+		_, msg, err := a.conn.ReadMessage()
+		if err != nil {
+			log.Error("Error while waiting for conection start: ", err.Error())
+			return
+		}
+		err = json.Unmarshal(msg, resp)
+		if err != nil {
+			log.Fatal("connection start error response: %s\n  Data: %s\n", err, string(msg))
+		}
+
+		subscriberIdentifier := resp.Action
+
+		switch resp.Action {
+
+		case "ping":
+			{
+
+				a.pong()
+				continue
+			}
+
+		case "disconnecting":
+			{
+				log.Info("Disconnecting...")
+				log.Info("disconnecting:", string(msg))
+				break
+			}
+		case "connected":
+			{
+				log.Debug("Conection message detected...")
+				sub, err := a.subscriber(subscriberIdentifier)
+				if err != nil {
+					log.Infof("No response handler for message: %s", string(msg))
+					continue // don't know how to handle message so just skip it
+				}
+				log.Debug("Connection response: ", string(msg))
+				sub <- msg
+			}
+
+		case "auth":
+			log.Debug("Auth message detected...")
+			sub, err := a.subscriber(subscriberIdentifier)
+			if err != nil {
+				log.Infof("No response handler for message: %s", string(msg))
+				continue // don't know how to handle message so just skip it
+			}
+			log.Debug("Connection response: ", string(msg))
+			a.connected = true
+			sub <- msg
+			break
+
+		default:
+			{
+				log.Fatal("unexpected message recieved: ", string(msg))
+			}
+		}
+	}
+
 }
 
 func (a *API) auth() error {
@@ -401,13 +667,14 @@ func (a *API) auth() error {
 }
 
 func (a *API) pong() {
-
 	msg := requestPong{"pong"}
-
+	a.cond.L.Lock()
 	err := a.conn.WriteJSON(msg)
+	a.cond.L.Unlock()
 	if err != nil {
-		a.Logger.Printf("Error while sending Pong message: %s", err)
+		log.Errorf("Error while sending Pong message: %s", err)
 	}
+
 }
 
 func (a *API) subscribe(action string) chan subscriberType {
@@ -436,4 +703,53 @@ func (a *API) subscriber(action string) (chan subscriberType, error) {
 	}
 
 	return sub, nil
+}
+
+func (ws *API) reconnect() {
+	log.Warn("Reconecting bot...")
+	ws.Connect()
+	log.Warn("Bot is back online")
+}
+
+func (ws *API) watchDog() {
+
+	ws.watchDogUp = true
+	time.Sleep(time.Second * 30)
+	log.Info("Watchdog is Up")
+	beatTime := time.Now()
+	go ws.beat()
+	for ws.connected {
+
+		select {
+		case <-ws.HeartBeat:
+			{
+				beatTime = time.Now()
+				//log.Debug("HeartBeat!!")
+			}
+		case <-ws.HeartMonitor:
+			{
+				elapsed := time.Since(beatTime)
+				//log.Debug("WatchDog elapsed: ", heartMonitor)
+				if elapsed.Seconds() > 4 {
+					log.Error("Watchdog timer expried!!!")
+					ws.Close("WatchDog")
+					time.Sleep(30 * time.Second)
+					beatTime = time.Now()
+					log.Debug("WatchDog awaken..")
+				}
+
+			}
+
+		}
+	}
+	log.Debug("WatchDog is DOWN!!")
+}
+
+func (ws *API) beat() {
+
+	for {
+		ws.HeartMonitor <- true
+		time.Sleep(3 * time.Second)
+	}
+
 }
