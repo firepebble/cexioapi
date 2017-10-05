@@ -35,7 +35,7 @@ type API struct {
 	ReceiveDone chan bool
 
 	//HeartBeat
-	HeartBeat chan bool
+	//HeartBeat chan bool
 
 	//HeartMonitor
 	HeartMonitor chan bool
@@ -44,6 +44,12 @@ type API struct {
 	cond      *sync.Cond
 	connected bool
 	bringUp   bool
+
+	authenticate bool
+
+	errorChan chan error
+
+	done chan bool
 }
 
 var apiURL = "wss://ws.cex.io/ws"
@@ -158,7 +164,7 @@ func (a *API) pong() {
 func (a *API) subscribe(action string) chan subscriberType {
 	a.subscriberMutex.Lock()
 	defer a.subscriberMutex.Unlock()
-
+	log.Debug("Subscribed to: ", action)
 	a.responseSubscribers[action] = make(chan subscriberType)
 
 	return a.responseSubscribers[action]
@@ -174,7 +180,7 @@ func (a *API) unsubscribe(action string) {
 func (a *API) subscriber(action string) (chan subscriberType, error) {
 	a.subscriberMutex.Lock()
 	defer a.subscriberMutex.Unlock()
-
+	log.Debug("Subscribed to: ", action)
 	sub, ok := a.responseSubscribers[action]
 	if ok == false {
 		return nil, fmt.Errorf("Subscriber '%s' not found", action)
@@ -191,39 +197,41 @@ func (ws *API) reconnect() {
 
 func (ws *API) watchDog() {
 
-	ws.watchDogUp = true
-	time.Sleep(time.Second * 30)
-	log.Info("Watchdog is Up")
-	beatTime := time.Now()
-	go ws.beat()
-	for ws.connected {
+	/*
+		ws.watchDogUp = true
+		time.Sleep(time.Second * 30)
+		log.Info("Watchdog is Up")
+		beatTime := time.Now()
+		go ws.beat()
+		for ws.connected {
 
-		select {
-		case <-ws.HeartBeat:
-			{
-				beatTime = time.Now()
-				//log.Debug("HeartBeat!!")
-			}
-		case <-ws.HeartMonitor:
-			{
-				elapsed := time.Since(beatTime)
-				//log.Debug("WatchDog elapsed: ", heartMonitor)
-				if elapsed.Seconds() > 15 {
-					log.Error("Watchdog timer expried!!!")
-					err := ws.Close("WatchDog")
-					if err != nil {
-						log.Error("Error running close:", err.Error())
-					}
-					time.Sleep(30 * time.Second)
+			select {
+			case <-ws.HeartBeat:
+				{
 					beatTime = time.Now()
-					log.Debug("WatchDog awaken..")
+					//log.Debug("HeartBeat!!")
+				}
+			case <-ws.HeartMonitor:
+				{
+					elapsed := time.Since(beatTime)
+					//log.Debug("WatchDog elapsed: ", heartMonitor)
+					if elapsed.Seconds() > 15 {
+						log.Error("Watchdog timer expried!!!")
+						err := ws.Close("WatchDog")
+						if err != nil {
+							log.Error("Error running close:", err.Error())
+						}
+						time.Sleep(30 * time.Second)
+						beatTime = time.Now()
+						log.Debug("WatchDog awaken..")
+					}
+
 				}
 
 			}
-
 		}
-	}
-	log.Debug("WatchDog is DOWN!!")
+		log.Debug("WatchDog is DOWN!!")
+	*/
 }
 
 func (ws *API) beat() {

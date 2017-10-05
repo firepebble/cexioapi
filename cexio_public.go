@@ -1,18 +1,19 @@
 package cexio
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
-	"sync"
-	log "github.com/sirupsen/logrus"
 	"strings"
-	"encoding/json"
+	"sync"
+	"time"
+
 	"github.com/gorilla/websocket"
+	log "github.com/sirupsen/logrus"
 )
 
 //NewAPI returns new API instance with default settings
-func NewAPI(key string, secret string) *API {
+func NewAPI(key string, secret string) (*API, chan error) {
 
 	api := &API{
 		Key:                 key,
@@ -23,19 +24,50 @@ func NewAPI(key string, secret string) *API {
 		orderBookHandlers:   map[string]chan bool{},
 		stopDataCollector:   false,
 		ReceiveDone:         make(chan bool),
+		authenticate:        true,
 	}
 	locker := &sync.Mutex{}
 	api.cond = sync.NewCond(locker)
 	api.HeartMonitor = make(chan bool)
-	api.HeartBeat = make(chan bool, 100)
-	return api
+	//	api.HeartBeat = make(chan bool, 100)
+	api.errorChan = make(chan error, 1)
+
+	return api, api.errorChan
+}
+
+//NewAPI returns new API instance with default settings
+func NewPublicAPI() (*API, chan error) {
+
+	api := &API{
+		Dialer:              websocket.DefaultDialer,
+		responseSubscribers: map[string]chan subscriberType{},
+		subscriberMutex:     sync.Mutex{},
+		orderBookHandlers:   map[string]chan bool{},
+		stopDataCollector:   false,
+		ReceiveDone:         make(chan bool),
+		authenticate:        false,
+	}
+	locker := &sync.Mutex{}
+	api.cond = sync.NewCond(locker)
+	api.HeartMonitor = make(chan bool)
+	//	api.HeartBeat = make(chan bool, 100)
+	api.errorChan = make(chan error, 1)
+
+	return api, api.errorChan
 }
 
 //Connect connects to cex.io websocket API server
 func (a *API) Connect() error {
 	a.cond.L.Lock()
+
+	// -------------------------------------------
+	// Create done channel on connect.
+	// Close closes it, so Connect must create it
+	// -------------------------------------------
+	a.done = make(chan bool)
+
 	a.connected = false
-	go a.watchDog()
+	//go a.watchDog()
 	sub := a.subscribe("connected")
 	defer a.unsubscribe("connected")
 
@@ -45,15 +77,20 @@ func (a *API) Connect() error {
 	}
 	a.conn = conn
 
+	log.Info("Dialed into websocket...")
+
 	// run response from API server collector
-	go a.connectionResponse()
+	go a.connectionResponse(a.authenticate)
 
 	<-sub //wait for connect response
 
 	// run authentication
-	err = a.auth()
-	if err != nil {
-		return err
+	if a.authenticate {
+		err = a.auth()
+		if err != nil {
+			a.cond.L.Unlock()
+			return err
+		}
 	}
 	log.Info("Connection complete!!")
 	a.connected = true
@@ -66,6 +103,12 @@ func (a *API) Connect() error {
 //Close closes API connection
 func (a *API) Close(ID string) error {
 	log.Info("Closing CEXIO Websocket connection...", ID)
+	a.stopDataCollector = true
+
+	close(a.done)
+
+	log.Info("Done channel closed...")
+
 	a.connected = false
 	//a.stopDataCollector = true
 
@@ -75,10 +118,7 @@ func (a *API) Close(ID string) error {
 		return err
 	}
 
-	go func() {
-		a.ReceiveDone <- true
-	}()
-	log.Info("CEXIO Websocket connection closed!!", ID)
+	log.Info("CEXIO Websocket connection closed!! ", ID)
 	return nil
 }
 
@@ -288,4 +328,63 @@ func (a *API) OrderBookSubscribe(cCode1 string, cCode2 string, depth int64, hand
 	go a.handleOrderBookSubscriptions(bookSnapshot, currencyPair, handler)
 
 	return bookSnapshot.Data.ID, nil
+}
+
+func (a *API) TickerSub(tickerChan chan ResponseTickerSubData) {
+	funcName := "TickerSub"
+	//Signal that the transaction was completed
+	log.Info("Registering tickerSub")
+	action := "tick"
+	sub := a.subscribe(action)
+	defer a.unsubscribe(action)
+
+	msg := requestTickerSub{
+		E:     "subscribe",
+		Rooms: []string{"tickers"},
+	}
+
+	// ------------
+	// Start Timer
+	// -----------
+
+	err := a.conn.WriteJSON(msg)
+	if err != nil {
+		tickerSubErr := fmt.Errorf("%s, WriteJSON :%s", funcName, err.Error())
+		log.Error(tickerSubErr)
+		a.errorChan <- tickerSubErr
+		return
+	}
+
+	log.Info("TickerSub request sent...")
+
+	for {
+		// wait for response from sever
+		select {
+
+		case <-a.done:
+			{
+				log.Infof("TickerSub exiting...")
+				return
+
+			}
+
+		case resp := <-sub:
+			{
+				respMsg := resp.([]byte)
+				resp := &ResponseTickerSub{}
+				err = json.Unmarshal(respMsg, resp)
+				if err != nil {
+					tickerSubErr := fmt.Errorf("%s, from response channel :%s", funcName, err.Error())
+					log.Error(tickerSubErr)
+					a.errorChan <- tickerSubErr
+					return
+				} else {
+					log.Info("RESP:", resp.Data.Symbol1, resp.Data.Symbol2, resp.Data.Price)
+					tickerChan <- resp.Data
+				}
+
+			}
+
+		}
+	}
 }

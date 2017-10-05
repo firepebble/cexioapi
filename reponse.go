@@ -8,12 +8,13 @@ import (
 )
 
 func (a *API) ResponseCollector() {
-	defer a.Close("ResponseCollector")
+	funcName := "ResponseCollector"
+	//defer a.Close("ResponseCollector")
 
 	a.stopDataCollector = false
 
 	resp := &responseAction{}
-
+	log.Info("running response collector...")
 	for a.stopDataCollector == false {
 		a.cond.L.Lock()
 		for !a.connected {
@@ -24,25 +25,28 @@ func (a *API) ResponseCollector() {
 		a.cond.L.Unlock()
 		_, msg, err := a.conn.ReadMessage()
 		if err != nil {
-			log.Error("responseCollector, ReadMessage error: ", err.Error())
-			//a.reconnect()
+			localErr := fmt.Errorf("%s, ReadMessage :%s", funcName, err.Error())
+			log.Error(localErr)
+			a.errorChan <- localErr
 			a.cond.L.Lock()
 			a.connected = false
 			a.cond.L.Unlock()
-			a.HeartBeat <- true
-			a.reconnect()
-			log.Debug("response: reconnect complete")
-			//continue
+			log.Debug("ResponseCollector shutting down due to error: ", localErr.Error())
+			return
+		} else {
+			log.Info("Message recieved...:", resp.Action, resp)
 		}
 
 		//Send heart beat
-		a.HeartBeat <- true
+		//a.HeartBeat <- true
 
 		err = json.Unmarshal(msg, resp)
 		if err != nil {
-			log.Errorf("responseCollector Unmarshal: %s\n", err, string(msg))
-			log.Error("RESP Action:", resp.Action)
-			//continue
+			localErr := fmt.Errorf("%s, Unmarshal :%s", funcName, err.Error())
+			log.Error(localErr)
+			a.errorChan <- localErr
+			log.Debug("ResponseCollector shutting down: ", localErr.Error())
+			return
 		}
 
 		subscriberIdentifier := resp.Action
@@ -51,7 +55,7 @@ func (a *API) ResponseCollector() {
 
 		case "ping":
 			{
-
+				log.Info("PONG!!")
 				go a.pong()
 				continue
 			}
@@ -62,6 +66,19 @@ func (a *API) ResponseCollector() {
 				log.Info("disconnecting:", string(msg))
 				break
 			}
+
+		case "connected":
+			{
+				log.Debug("Conection message detected...")
+				sub, err := a.subscriber(subscriberIdentifier)
+				if err != nil {
+					log.Infof("No response handler for message: %s", string(msg))
+					continue // don't know how to handle message so just skip it
+				}
+				log.Debug("Connection response: ", string(msg))
+				sub <- msg
+			}
+
 		case "order-book-subscribe":
 			{
 
@@ -132,7 +149,7 @@ func (a *API) ResponseCollector() {
 				continue // don't know how to handle message so just skip it
 			}
 			//log.Debug("Sending response:", string(msg))
-			a.HeartBeat <- true
+			//a.HeartBeat <- true
 			sub <- msg
 
 		}
@@ -140,7 +157,7 @@ func (a *API) ResponseCollector() {
 
 }
 
-func (a *API) connectionResponse() {
+func (a *API) connectionResponse(expectAuth bool) {
 
 	resp := &responseAction{}
 
@@ -171,7 +188,7 @@ func (a *API) connectionResponse() {
 			{
 				log.Info("Disconnecting...")
 				log.Info("disconnecting:", string(msg))
-				break
+				return
 			}
 		case "connected":
 			{
@@ -183,6 +200,11 @@ func (a *API) connectionResponse() {
 				}
 				log.Debug("Connection response: ", string(msg))
 				sub <- msg
+				if !expectAuth {
+					log.Info("BREAKING!!!!")
+					a.connected = true
+					return
+				}
 			}
 
 		case "auth":
@@ -195,11 +217,11 @@ func (a *API) connectionResponse() {
 			log.Debug("Connection response: ", string(msg))
 			a.connected = true
 			sub <- msg
-			break
+			return
 
 		default:
 			{
-				log.Fatal("unexpected message recieved: ", string(msg))
+				log.Fatal("Connection response: unexpected message recieved: ", string(msg))
 			}
 		}
 	}
