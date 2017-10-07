@@ -55,6 +55,7 @@ func (a *API) ResponseCollector() {
 
 		case "ping":
 			{
+				a.HeartBeat <- true
 				log.Info("PONG!!")
 				go a.pong()
 				continue
@@ -62,6 +63,7 @@ func (a *API) ResponseCollector() {
 
 		case "disconnecting":
 			{
+				a.HeartBeat <- true
 				log.Info("Disconnecting...")
 				log.Info("disconnecting:", string(msg))
 				break
@@ -69,6 +71,7 @@ func (a *API) ResponseCollector() {
 
 		case "connected":
 			{
+				a.HeartBeat <- true
 				log.Debug("Conection message detected...")
 				sub, err := a.subscriber(subscriberIdentifier)
 				if err != nil {
@@ -81,7 +84,7 @@ func (a *API) ResponseCollector() {
 
 		case "order-book-subscribe":
 			{
-
+				a.HeartBeat <- true
 				ob := &responseOrderBookSubscribe{}
 				err = json.Unmarshal(msg, ob)
 				if err != nil {
@@ -102,7 +105,7 @@ func (a *API) ResponseCollector() {
 			}
 		case "md_update":
 			{
-
+				a.HeartBeat <- true
 				ob := &responseOrderBookUpdate{}
 				err = json.Unmarshal(msg, ob)
 				if err != nil {
@@ -123,6 +126,7 @@ func (a *API) ResponseCollector() {
 			}
 		case "get-balance":
 			{
+				a.HeartBeat <- true
 				ob := &responseGetBalance{}
 				err = json.Unmarshal(msg, ob)
 				if err != nil {
@@ -143,13 +147,14 @@ func (a *API) ResponseCollector() {
 			}
 
 		default:
+			a.HeartBeat <- true
 			sub, err := a.subscriber(subscriberIdentifier)
 			if err != nil {
 				log.Errorf("No response handler for message: %s", string(msg))
 				continue // don't know how to handle message so just skip it
 			}
 			//log.Debug("Sending response:", string(msg))
-			//a.HeartBeat <- true
+
 			sub <- msg
 
 		}
@@ -179,19 +184,21 @@ func (a *API) connectionResponse(expectAuth bool) {
 
 		case "ping":
 			{
-
+				a.HeartBeat <- true
 				a.pong()
 				continue
 			}
 
 		case "disconnecting":
 			{
+				a.HeartBeat <- true
 				log.Info("Disconnecting...")
 				log.Info("disconnecting:", string(msg))
 				return
 			}
 		case "connected":
 			{
+				a.HeartBeat <- true
 				log.Debug("Conection message detected...")
 				sub, err := a.subscriber(subscriberIdentifier)
 				if err != nil {
@@ -208,6 +215,7 @@ func (a *API) connectionResponse(expectAuth bool) {
 			}
 
 		case "auth":
+			a.HeartBeat <- true
 			log.Debug("Auth message detected...")
 			sub, err := a.subscriber(subscriberIdentifier)
 			if err != nil {
@@ -221,6 +229,7 @@ func (a *API) connectionResponse(expectAuth bool) {
 
 		default:
 			{
+				a.HeartBeat <- true
 				log.Fatal("Connection response: unexpected message recieved: ", string(msg))
 			}
 		}

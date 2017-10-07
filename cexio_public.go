@@ -25,11 +25,12 @@ func NewAPI(key string, secret string) (*API, chan error) {
 		stopDataCollector:   false,
 		ReceiveDone:         make(chan bool),
 		authenticate:        true,
+		reconAtempts:        100,
 	}
 	locker := &sync.Mutex{}
 	api.cond = sync.NewCond(locker)
 	api.HeartMonitor = make(chan bool)
-	//	api.HeartBeat = make(chan bool, 100)
+	api.HeartBeat = make(chan bool, 100)
 	api.errorChan = make(chan error, 1)
 
 	return api, api.errorChan
@@ -46,11 +47,12 @@ func NewPublicAPI() (*API, chan error) {
 		stopDataCollector:   false,
 		ReceiveDone:         make(chan bool),
 		authenticate:        false,
+		reconAtempts:        100,
 	}
 	locker := &sync.Mutex{}
 	api.cond = sync.NewCond(locker)
 	api.HeartMonitor = make(chan bool)
-	//	api.HeartBeat = make(chan bool, 100)
+	api.HeartBeat = make(chan bool, 100)
 	api.errorChan = make(chan error, 1)
 
 	return api, api.errorChan
@@ -67,16 +69,30 @@ func (a *API) Connect() error {
 	a.done = make(chan bool)
 
 	a.connected = false
-	//go a.watchDog()
+	go a.watchDog()
 	sub := a.subscribe("connected")
 	defer a.unsubscribe("connected")
 
+	// --------------------------------
+	// Attempt to connect to websocket
+	// --------------------------------
+	errCounter := a.reconAtempts
 	conn, _, err := a.Dialer.Dial(apiURL, nil)
-	if err != nil {
-		return err
+	for err != nil {
+		conn, _, err = a.Dialer.Dial(apiURL, nil)
+		if err == nil {
+
+			break
+		}
+		errCounter--
+		if errCounter <= 0 {
+			err = fmt.Errorf("Could not connect to websocket after %d attempts: %s", a.reconAtempts, err.Error())
+			return err
+		}
+		log.Debugf("Websocket Connection error, will try %d more times : %s", errCounter, err.Error())
+		time.Sleep(time.Second * 30)
 	}
 	a.conn = conn
-
 	log.Info("Dialed into websocket...")
 
 	// run response from API server collector

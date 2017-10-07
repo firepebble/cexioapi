@@ -34,8 +34,7 @@ type API struct {
 	//ReceiveDone send message after Close() initiation
 	ReceiveDone chan bool
 
-	//HeartBeat
-	//HeartBeat chan bool
+	HeartBeat chan bool
 
 	//HeartMonitor
 	HeartMonitor chan bool
@@ -50,6 +49,8 @@ type API struct {
 	errorChan chan error
 
 	done chan bool
+
+	reconAtempts int
 }
 
 var apiURL = "wss://ws.cex.io/ws"
@@ -151,6 +152,7 @@ func (a *API) auth() error {
 }
 
 func (a *API) pong() {
+	log.Info("Pong!!")
 	msg := requestPong{"pong"}
 	a.cond.L.Lock()
 	err := a.conn.WriteJSON(msg)
@@ -197,45 +199,46 @@ func (ws *API) reconnect() {
 
 func (ws *API) watchDog() {
 
-	/*
-		ws.watchDogUp = true
-		time.Sleep(time.Second * 30)
-		log.Info("Watchdog is Up")
-		beatTime := time.Now()
-		go ws.beat()
-		for ws.connected {
+	ws.watchDogUp = true
+	time.Sleep(time.Second * 5)
+	log.Info("Watchdog is Up")
+	beatTime := time.Now()
+	go ws.beat()
+	for ws.connected {
 
-			select {
-			case <-ws.HeartBeat:
-				{
-					beatTime = time.Now()
-					//log.Debug("HeartBeat!!")
-				}
-			case <-ws.HeartMonitor:
-				{
-					elapsed := time.Since(beatTime)
-					//log.Debug("WatchDog elapsed: ", heartMonitor)
-					if elapsed.Seconds() > 15 {
-						log.Error("Watchdog timer expried!!!")
-						err := ws.Close("WatchDog")
-						if err != nil {
-							log.Error("Error running close:", err.Error())
-						}
-						time.Sleep(30 * time.Second)
-						beatTime = time.Now()
-						log.Debug("WatchDog awaken..")
-					}
+		select {
+		case <-ws.HeartBeat:
+			{
+				localElapsed := time.Since(beatTime)
+				log.Debug("HeartBeat elapsed: ", localElapsed.Seconds())
+				beatTime = time.Now()
 
+				continue
+			}
+		case <-ws.HeartMonitor:
+			{
+				elapsed := time.Since(beatTime)
+				//log.Debug("WatchDog elapsed: ", heartMonitor)
+				if elapsed.Seconds() > 120 {
+					timeOutErr := fmt.Errorf("Watchdog timer expried!!!")
+					log.Error(timeOutErr)
+					ws.errorChan <- timeOutErr
+					return
 				}
 
 			}
+		case <-ws.done:
+			{
+				log.Info("Watchdog exiting...")
+				return
+			}
 		}
-		log.Debug("WatchDog is DOWN!!")
-	*/
+	}
+	log.Debug("WatchDog is DOWN!!")
+
 }
 
 func (ws *API) beat() {
-
 	for ws.connected {
 		ws.HeartMonitor <- true
 		time.Sleep(1 * time.Second)
