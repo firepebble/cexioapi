@@ -34,7 +34,7 @@ func (a *API) ResponseCollector() {
 			log.Debug("ResponseCollector shutting down due to error: ", localErr.Error())
 			return
 		} else {
-			log.Info("Message recieved...:", resp.Action, resp)
+			log.Debug("Message recieved: ", resp.Action)
 		}
 
 		//Send heart beat
