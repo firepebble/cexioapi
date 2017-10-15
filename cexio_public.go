@@ -395,7 +395,7 @@ func (a *API) TickerSub(tickerChan chan ResponseTickerSubData) {
 					a.errorChan <- tickerSubErr
 					return
 				} else {
-					log.Info("RESP:", resp.Data.Symbol1, resp.Data.Symbol2, resp.Data.Price)
+					//log.Info("RESP:", resp.Data.Symbol1, resp.Data.Symbol2, resp.Data.Price)
 					tickerChan <- resp.Data
 				}
 

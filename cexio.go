@@ -182,7 +182,7 @@ func (a *API) unsubscribe(action string) {
 func (a *API) subscriber(action string) (chan subscriberType, error) {
 	a.subscriberMutex.Lock()
 	defer a.subscriberMutex.Unlock()
-	log.Debug("Subscribed to: ", action)
+	//log.Debug("Subscribed to: ", action)
 	sub, ok := a.responseSubscribers[action]
 	if ok == false {
 		return nil, fmt.Errorf("Subscriber '%s' not found", action)
@@ -209,8 +209,8 @@ func (ws *API) watchDog() {
 		select {
 		case <-ws.HeartBeat:
 			{
-				localElapsed := time.Since(beatTime)
-				log.Debug("HeartBeat elapsed: ", localElapsed.Seconds())
+				//localElapsed := time.Since(beatTime)
+				//log.Debug("HeartBeat elapsed: ", localElapsed.Seconds())
 				beatTime = time.Now()
 
 				continue

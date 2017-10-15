@@ -33,8 +33,6 @@ func (a *API) ResponseCollector() {
 			a.cond.L.Unlock()
 			log.Debug("ResponseCollector shutting down due to error: ", localErr.Error())
 			return
-		} else {
-			log.Debug("Message recieved: ", resp.Action)
 		}
 
 		//Send heart beat
