@@ -60,7 +60,7 @@ func NewPublicAPI() (*API, chan error) {
 
 //Connect connects to cex.io websocket API server
 func (a *API) Connect() error {
-	a.cond.L.Lock()
+	go a.watchDog()
 
 	// -------------------------------------------
 	// Create done channel on connect.
@@ -68,8 +68,10 @@ func (a *API) Connect() error {
 	// -------------------------------------------
 	a.done = make(chan bool)
 
+	a.cond.L.Lock()
 	a.connected = false
-	go a.watchDog()
+	a.cond.L.Unlock()
+
 	sub := a.subscribe("connected")
 	defer a.unsubscribe("connected")
 
@@ -104,13 +106,15 @@ func (a *API) Connect() error {
 	if a.authenticate {
 		err = a.auth()
 		if err != nil {
-			a.cond.L.Unlock()
 			return err
 		}
 	}
 	log.Info("Connection complete!!")
+	a.cond.L.Lock()
 	a.connected = true
 	a.cond.L.Unlock()
+	log.Info("Sending broadcast...")
+
 	a.cond.Broadcast()
 
 	return nil

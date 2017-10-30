@@ -198,9 +198,15 @@ func (ws *API) reconnect() {
 }
 
 func (ws *API) watchDog() {
+	//time.Sleep(time.Second * 30)
+	ws.cond.L.Lock()
+	log.Info("Watchdog Waiting....")
+	ws.cond.Wait()
+	log.Info("Watchdog locked...")
+	ws.cond.L.Unlock()
 
 	ws.watchDogUp = true
-	time.Sleep(time.Second * 5)
+	//time.Sleep(time.Second * 5)
 	log.Info("Watchdog is Up")
 	beatTime := time.Now()
 	go ws.beat()
